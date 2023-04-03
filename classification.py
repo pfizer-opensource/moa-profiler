@@ -620,7 +620,6 @@ def extractProfilerRepresentations(study="JUMP1", method=None, loader=None, deep
             profile_map = pickle.load(open("pickles/{}/cellProfilerFeatures.pkl".format(study), "rb"))
         if study == "lincs":
             profile_map = pickle.load(open("pickles/{}/cellProfilerFeatures_from_repo_level_3.pkl".format(study), "rb"))
-            # profile_map = pickle.load(open("pickles/{}/cellProfilerFeatures_from_repo_spherized.pkl".format(study), "rb")) ##technically these are more optimized with normalization to DMSO / plate and a ton of pre-processing and feature selection
     if method == "deepProfiler":
         profile_map = pickle.load(open("pickles/{}/deepProfilerFeatures_from_{}.pkl".format(study, deep_profile_type), "rb"))
     ##iterate over loader 
