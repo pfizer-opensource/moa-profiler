@@ -1,0 +1,1 @@
+Namespace(comparison_embeddings='test_set', continue_training=False, distributed_data_parallel=True, eval_batch_size=14, label_type='moa_targets_compounds', lr=0.1, mode='train', momentum=0.9, n_epochs=50, num_training_gpus=4, print_freq=100, study='JUMP1', wd=0.0001)

@@ -1,0 +1,1 @@
+Namespace(architecture='efficientnet', comparison_embeddings='test_set', continue_training=False, distributed_data_parallel=True, eval_batch_size=14, label_type='moas_10uM_compounds_holdout_2', lr=0.1, mode='train', momentum=0.9, n_epochs=100, num_training_gpus=4, print_freq=100, scheme=3, study='lincs', wd=0.0001)
