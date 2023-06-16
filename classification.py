@@ -1015,9 +1015,10 @@ def train_distributed(gpu, model=None, train_set=None, valid_loader=None, test_l
 def getStratifiedPerformance(model=None, loader=None, stratify_by="well", label_index_map=None):
     """
     Get performance by some stratification criteria
-    Stratify by either "plate", "plate_MOA", "well", "perturbation" or (if study==lincs) "concentration"
+    Stratify by either "plate", "plate_MOA", "well", "perturbation", (if study==lincs) "concentration", (if study==JUMP1) "cell_type", "timepoint"
     Saves dictionary 
     """
+    cell_type_time_map = pickle.load(open("pickles/JUMP1/barcode_to_cell_type_and_time.pkl", "rb")) ##only used for JUMP stratification
     reverse_map = {value: key for (key, value) in label_index_map.items()}
     if stratify_by == "concentration":
         img_name_to_conc = {}
@@ -1048,6 +1049,13 @@ def getStratifiedPerformance(model=None, loader=None, stratify_by="well", label_
                     key = perturbation[j]
                 if stratify_by == "concentration":
                     key = img_name_to_conc[imagenames[j]]
+                if stratify_by == "cell_type":
+                    cell_type, timepoint = cell_type_time_map[getJumpBatch(imagenames[j]) + "|" + getBarcode(imagenames[j])]
+                    key = cell_type
+                if stratify_by == "timepoint":
+                    cell_type, timepoint = cell_type_time_map[getJumpBatch(imagenames[j]) + "|" + getBarcode(imagenames[j])]
+                    key = timepoint
+
                 if key not in stratified_performance_dict:
                     if target[j] == pred.squeeze()[j]: ##if prediction is correct
                         stratified_performance_dict[key]=[1]
@@ -1198,7 +1206,7 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
     classes = []
     for i in range(0, len(reverse_map)):
         classes.append(reverse_map[i])
-    k_map = {} ##key: k, value: accuracy, precision,recall
+    k_map = {} ##key: k, value: ((accuracy, precision,recall), (prediction, labels))
     largest_k = 24 if study == "JUMP1" else 11 ##JUMP1 compounds were mostly at 23 compound replicates, LINCS had a range from 0 -> 10 
     for k in range(1, largest_k):
         predictions, labels = [], []
@@ -1211,9 +1219,10 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
                 predictions.append(perturbation_to_well_predictions[pert][0][0])
             labels.append(true_label)
         accuracy, precision, recall = getScores(predictions=predictions, labels=labels, classes=classes)
-        k_map[k] = (accuracy, precision, recall)
+        k_map[k] = ((accuracy, precision, recall), (predictions, labels))
         if k == 1:
-            print("latent vote by wells, k={}: {}".format(k, accuracy))
+            print("    latent vote by wells, k={}: {} {}".format(k, accuracy, len((perturbation_to_well_predictions))))
+    
     ##for each held-out perturbation, can also take the aggregate over all well-level embeddings of this perturbation, and find the class latent embedding that is closest to this aggregated embedding. Can do for top-k similarities.  
     ##find the aggregated embedding of each perturbation, key: perturbation, value: list of well-level embeddings that we will later take the aggregate over
     perturbation_to_aggregate = {}
@@ -1245,7 +1254,7 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
         all_class_preds = sorted(all_class_preds, key=lambda x: x[1], reverse=True)
         predictions.append(all_class_preds)
         labels.append(true_label)
-    latent_k_map = {} ##key: k, value: (accuracy, precision, recall)
+    latent_k_map = {} ##key: k, value: ((accuracy, precision, recall), (sub_preds, sub_labels))
     for k in range(1, len(class_to_aggregate_embedding) + 1): ##go from top-1 to top-all (i.e. all classes possible, which should yield 100% -> look at enrichment)
         sub_preds, sub_labels = [], []
         for i in range(0, len(labels)):
@@ -1258,8 +1267,10 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
                 sub_preds.append(top_k[0])
         accuracy, precision, recall = getScores(predictions=sub_preds, labels=sub_labels, classes=classes)
         if k == 1:
-            print("assignment by {} embedding similarity, k={}: {}".format(class_aggregator, k, accuracy))
-        latent_k_map[k] = (accuracy, precision, recall)
+            print("    assignment by {} embedding similarity, k={}: {} {}".format(class_aggregator, k, accuracy, len(sub_labels)))
+            
+        # latent_k_map[k] = (accuracy, precision, recall)
+        latent_k_map[k] = ((accuracy, precision, recall), (sub_preds, sub_labels))
     return pred_labels_map, k_map, latent_k_map
 
 def getScores(predictions=None, labels=None, classes=None):
@@ -1439,6 +1450,46 @@ def standardizeEmbeddings(latent_dictionary):
         latent_copy["embeddings"][i] = matrix[i]
     return latent_copy
 
+def standardizeEmbeddingsByDMSO(latent_dictionary):
+    latent_copy = copy.deepcopy(latent_dictionary)
+    DMSO_matrix = []
+    full_matrix = []
+    for i in range(0, len(latent_copy["embeddings"])):
+        if latent_copy["perturbations"][i] in ["DMSO", "Empty"]:
+            DMSO_matrix.append(latent_copy["embeddings"][i])
+        full_matrix.append(latent_copy["embeddings"][i])
+    DMSO_matrix = np.array(DMSO_matrix)
+    full_matrix = np.array(full_matrix)
+    full_matrix = (full_matrix - DMSO_matrix.mean(axis=0)) / (DMSO_matrix.std(axis=0) + .0000000000001) ##add small offset in case std is 0
+    for i in range(0, len(latent_copy["embeddings"])):
+        latent_copy["embeddings"][i] = full_matrix[i]
+    return latent_copy
+
+def standardizeEmbeddingsByDMSOPlate(latent_dictionary):
+    latent_copy = copy.deepcopy(latent_dictionary)
+    matrix = []
+    plate_to_DMSO_embeddings = {plate: [] for plate in set([getBarcode(latent_copy["wells"][i]) for i in range(0, len(latent_copy["wells"]))])} ##key plate, value: list of DMSO embeddings for that plate
+    plate_to_other_embeddings = {plate: [] for plate in set([getBarcode(latent_copy["wells"][i]) for i in range(0, len(latent_copy["wells"]))])}##key plate, value: list of other embeddings for that plate
+    DMSO_plate_stats_map = {} ##key plate, value: DMSO [mean, std]
+    ##instantiate plate to embeddings
+    for i in range(0, len(latent_copy["embeddings"])):
+        plate = getBarcode(latent_copy["wells"][i])
+        if latent_copy["perturbations"][i] in ["DMSO", "Empty"]:
+            plate_to_DMSO_embeddings[plate].append(latent_copy["embeddings"][i])
+        else:
+            plate_to_other_embeddings[plate].append(latent_copy["embeddings"][i])
+    ##calculate mean and std of DMSO per plate 
+    for plate in plate_to_DMSO_embeddings:
+        DMSO_plate_stats_map[plate] = np.mean(np.array(plate_to_DMSO_embeddings[plate]), axis=0), np.std(np.array(plate_to_DMSO_embeddings[plate]), axis=0)
+    ##standardize embeddings by DMSO
+    new_embeddings = []
+    for i in range(0, len(latent_copy["embeddings"])):
+        plate = getBarcode(latent_copy["wells"][i])
+        mean, std = DMSO_plate_stats_map[plate]
+        new_embeddings.append((latent_copy["embeddings"][i] - mean) / (std + .0000000000001))
+    latent_copy["embeddings"] = new_embeddings
+    return latent_copy
+
 def standardizeEmbeddingsByPlate(latent_dictionary):
     """
     Given a latent dictionary with key "embeddings", will standardize to zero mean and unit variance for each column by plate
@@ -1464,7 +1515,6 @@ def standardizeEmbeddingsByPlate(latent_dictionary):
     return latent_copy
 
 def filterToTestSet(latent_dictionary, test_csv, study=None):
-    print("length before filter to test: ", len(latent_dictionary["labels"]))
     test_df = pd.read_csv(test_csv)
     if study == "JUMP1":
         test_wells = set([getJumpBatch(test_df["imagename"][i]) + getBarcode(test_df["imagename"][i]) + getRowColumn(test_df["imagename"][i]) for i in range(0, len(test_df))])
@@ -1478,12 +1528,12 @@ def filterToTestSet(latent_dictionary, test_csv, study=None):
             indices_to_keep.append(i)
     for key in latent_copy:
         latent_copy[key] = [latent_copy[key][i] for i in indices_to_keep]
-    print("length after filter to test: ", len(latent_copy["labels"]))
     return latent_copy
 
 def logisticRegression(latent_dictionary, study=None, training_csv=None, test_csv=None, drop_neg_control=True):
     if drop_neg_control:
-        latent_dictionary = removeEmptyLabels(latent_dictionary) 
+        latent_copy = removeEmptyLabels(latent_dictionary) 
+    latent_copy = copy.deepcopy(latent_dictionary)
     training_df = pd.read_csv(training_csv)
     test_df = pd.read_csv(test_csv)
     if study == "JUMP1":
@@ -1497,24 +1547,58 @@ def logisticRegression(latent_dictionary, study=None, training_csv=None, test_cs
     training_latent = {"labels": [], "embeddings":[], "perturbations":[]}
     test_latent = {"labels": [], "embeddings":[], "perturbations":[]}
     validation_or_not_found = []
-    for i in range(0, len(latent_dictionary["perturbations"])):
-        # print(latent_dictionary["wells"][i])
-        if latent_dictionary["wells"][i] in training_wells:
-            training_latent["labels"].append(latent_dictionary["labels"][i])
-            training_latent["perturbations"].append(latent_dictionary["perturbations"][i])
-            training_latent["embeddings"].append(latent_dictionary["embeddings"][i])
-        elif latent_dictionary["wells"][i] in test_wells:
-            test_latent["labels"].append(latent_dictionary["labels"][i])
-            test_latent["perturbations"].append(latent_dictionary["perturbations"][i])
-            test_latent["embeddings"].append(latent_dictionary["embeddings"][i])
+    for i in range(0, len(latent_copy["perturbations"])):
+        if latent_copy["wells"][i] in training_wells:
+            training_latent["labels"].append(latent_copy["labels"][i])
+            training_latent["perturbations"].append(latent_copy["perturbations"][i])
+            training_latent["embeddings"].append(latent_copy["embeddings"][i])
+        elif latent_copy["wells"][i] in test_wells:
+            test_latent["labels"].append(latent_copy["labels"][i])
+            test_latent["perturbations"].append(latent_copy["perturbations"][i])
+            test_latent["embeddings"].append(latent_copy["embeddings"][i])
         else:
-            validation_or_not_found.append(latent_dictionary["wells"][i])
+            validation_or_not_found.append(latent_copy["wells"][i])
+    
+    ##remove single compound MOAs from test latent
+    test_latent = removeSingleCompoundMOAEmbeddings(test_latent)
+    
     training_embeddings = np.array(training_latent["embeddings"])
     training_labels = list(training_latent["labels"])
     test_embeddings = np.array(test_latent["embeddings"])
     test_labels = list(test_latent["labels"])
-    logisticRegr = LogisticRegression(max_iter=10000)
+    logisticRegr = LogisticRegression(max_iter=10000)   
     logisticRegr.fit(training_embeddings, training_labels)
     test_predictions = logisticRegr.predict(test_embeddings)
-    scores = getScores(predictions=test_predictions, labels=test_labels, classes=list(set(latent_dictionary["labels"])))
+    scores = getScores(predictions=test_predictions, labels=test_labels, classes=list(set(latent_copy["labels"])))
     return scores
+
+def removeSingleCompoundMOAEmbeddings(latent_dictionary):
+    """
+    Will remove all embeddings that belong to an MOA that are just represented by one compound (cousin-less compounds) EXCEPT DMSO control
+    and return a copy
+    """
+    latent_copy = copy.deepcopy(latent_dictionary)
+    moa_to_perturbations = {m: set() for m in set(latent_dictionary["labels"])} ##key: moa, value: set of perturbations
+    for i in range(0, len(latent_dictionary["labels"])):
+        moa_to_perturbations[latent_dictionary["labels"][i]].add(latent_dictionary["perturbations"][i])
+    single_compound_moas = [m for m in moa_to_perturbations if len(moa_to_perturbations[m]) < 2]
+    indices_to_keep = []
+    for i in range(0, len(latent_copy["labels"])):
+        if latent_copy["labels"][i] not in single_compound_moas or latent_copy["perturbations"][i] in ["DMSO", "Empty"]:
+            indices_to_keep.append(i)
+    for key in latent_copy:
+        latent_copy[key] = [latent_copy[key][i] for i in indices_to_keep]
+    return latent_copy
+
+def removeSingleCompoundMOAEmbeddingsFromDF(df):
+    """
+    From Pandas Dataframe, will remove all embeddings that belong to an MOA that are just represented by one compound (cousin-less compounds) EXCEPT DMSO control
+    and return a copy
+    """
+    df_copy = df.copy()
+    moa_to_perturbations = {m: set() for m in set(df_copy["moas"])} ##key: moa, value: set of perturbations
+    for index, row in df.iterrows():
+        moa_to_perturbations[row["moas"]].add(latent_dictionary["perturbations"])
+    single_compound_moas = [m for m in moa_to_perturbations if len(moa_to_perturbations[m]) < 2]
+    df_copy = df_copy[~df_copy["moas"].isin(single_compound_moas)]
+    return df_copy

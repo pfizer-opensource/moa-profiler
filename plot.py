@@ -114,7 +114,7 @@ def plotScoreByAggregatedLatentRep(study=None, class_aggregator="mean", metric=N
     ax.set_xticks(x)
     for score_type in scores_map:
         scores = scores_map[score_type]
-        print("{} {} {} class latent, MP percent improvement over CP: {} and DP: {}".format(study, label_type, score_type, (scores[2] - scores[0]) / scores[0], (scores[2] - scores[1]) / scores[1]))
+        print("{} {} class latent {} {} , MP percent improvement over CP: {} and DP: {}".format(study, label_type, score_type, scores, (scores[2] - scores[0]) / scores[0], (scores[2] - scores[1]) / scores[1]))
         bar = ax.bar(x, scores, width=width, color=color_map[score_type], label=score_type)
         for i,j in zip(x, scores):
             ax.annotate("{:.0%}".format(j), xy=(i - .03, j +.03),fontsize=6)
@@ -142,6 +142,30 @@ def getDMSOWellLocations(study="JUMP1"):
         if row["perturbation"] in ["Empty", "DMSO"]:
             wells.add(getRowColumn(row["imagename"]))
     return wells
+
+def plotCellTypeTimepointSpecificPerformance(study="JUMP1", label_type=None):
+    if study != "JUMP1":
+        return ##only JUMP1 has cell type and timepoint differentiation
+    for strat in ["cell_type", "timepoint"]:
+        fig, ax = plt.subplots()
+        stratified_performance_dict = pickle.load(open("pickles/{}/plot/{}_specific_performance_map_{}.pkl".format(study, strat, label_type), "rb"))   
+        xlabels = sorted(list(stratified_performance_dict.keys()))
+        x = list(range(1, len(xlabels) + 1))
+        y = [stratified_performance_dict[key][0] for key in xlabels]
+        n = [stratified_performance_dict[key][1] for key in xlabels]
+        ax.bar(x, y)
+        ax.set_xticks(x)
+        ax.set_ylim(0, 1)
+        if strat == "cell_type":
+            xlabels = [str(xlabels[i]) + "\nn={} images".format(n[i]) for i in range(0, len(n))]
+        else:
+            xlabels = [str(xlabels[i]) + " Hours\nn={} images".format(n[i]) for i in range(0, len(n))]
+        ax.set_xticklabels(xlabels)
+        ax.set_ylabel("Accuracy")
+        for i,j in zip(x, y):
+            ax.annotate("{:.0%}".format(j), xy=(i - .05, j +.02),fontsize=8)
+        plt.title("JUMP1 Classification Performance by {}".format(strat.replace("_", " ").title()))
+        plt.savefig("outputs/{}_specific_performance_{}_{}.png".format(strat, study, label_type), dpi=300)
     
 def plotWellSpecificPerformance(study="JUMP1", label_type=None):
     """
@@ -190,7 +214,7 @@ def plotWellSpecificPerformance(study="JUMP1", label_type=None):
     for i in range(0, len(plate)):
         for j in range(0, len(plate[i])):
             if plate[i][j] == -1 and (i,j) not in DMSO_annotated:
-                text = ax.text(j, i, "N/A",  ha="center", va="center", color="white", fontsize=6)
+                text = ax.text(j, i, "N/A",  ha="center", va="center", color="grey", fontsize=6)
     ax.set_xticks(np.arange(24))
     ax.set_yticks(np.arange(16))
     ax.set_xticklabels(list(range(1, 25)),fontsize=8)
@@ -332,7 +356,6 @@ def generateIntraMOAvsInter(study=None, label_type=None, well_aggregator=None, m
             similarity = scipy.stats.pearsonr(embeddings[index1], embeddings[index2])[0]
         if metric == "cosine":
             similarity = 1.0 - scipy.spatial.distance.cosine(embeddings[index1], embeddings[index2])
-
         if labels[index1] == labels[index2] and perturbations[index1] == perturbations[index2]: #same label, same perturbation
             same_pert_similarities.append(similarity)
             same_pert_similarities_moa_specific[labels[index1]].append(similarity)
@@ -347,33 +370,52 @@ def generateIntraMOAvsInter(study=None, label_type=None, well_aggregator=None, m
         same_pert_similarities = [np.mean(same_pert_similarities_moa_specific[key]) for key in same_pert_similarities_moa_specific if len(same_pert_similarities_moa_specific[key]) > 0]
         intra_similarities = [np.mean(intra_similarities_moa_specific[key]) for key in intra_similarities_moa_specific if len(intra_similarities_moa_specific[key]) > 0]
     pert_mean, pert_std, pert_size = np.mean(same_pert_similarities), np.std(same_pert_similarities), len(same_pert_similarities)
-    intra_mean, intra_std, intra_size = np.mean(intra_similarities), np.std(intra_similarities), len(intra_similarities)
+    intra_size = len(intra_similarities)
+    if intra_size != 0: ##compound holdout will not have an intra population because only 1 held-out compound for each MOA (due to limited data size)
+        intra_mean, intra_std = np.mean(intra_similarities), np.std(intra_similarities)
     inter_mean, inter_std, inter_size = np.mean(inter_similarities), np.std(inter_similarities), len(inter_similarities)
+
     ##statistical significance between populations inter and intra
-    z_val = (intra_mean - inter_mean) / float( np.sqrt( ((intra_std**2) / float(len(intra_similarities))) + ((inter_std**2) / float(len(inter_similarities))))) 
-    cdf_one_sided = scipy.stats.norm.cdf(z_val) 
-    cdf_two_sided = (scipy.stats.norm.cdf(z_val) * 2) - 1 
-    p_val_one_sided = 1 - cdf_one_sided ##we want the one sided with Ho: means are equal, 
-    p_val_two_sided = 1 - cdf_two_sided ##we want the one sided with Ho: means are equal, alternative: not equal 
-    print("z_val: ", z_val)
-    print("p-value: {}, {:E}".format(p_val_two_sided, p_val_two_sided))
+    if intra_size != 0:
+        z_val = (intra_mean - inter_mean) / float( np.sqrt( ((intra_std**2) / float(len(intra_similarities))) + ((inter_std**2) / float(len(inter_similarities))))) 
+        cdf_one_sided = scipy.stats.norm.cdf(z_val) 
+        cdf_two_sided = (scipy.stats.norm.cdf(z_val) * 2) - 1 
+        p_val_one_sided = 1 - cdf_one_sided ##we want the one sided with Ho: means are equal, 
+        p_val_two_sided = 1 - cdf_two_sided ##we want the one sided with Ho: means are equal, alternative: not equal 
+        print("z_val: ", z_val)
+        print("p-value: {}, {:E}".format(p_val_two_sided, p_val_two_sided))
+    
     fig, ax = plt.subplots()
-    xlabels = ["Same Compound\nSame MOA", "Different Compound\nSame MOA", "Different Compound\nDifferent MOA"]
-    x = np.array([1,2,3])
+    if intra_size != 0:
+        xlabels = ["Same Compound\nSame MOA", "Different Compound\nSame MOA", "Different Compound\nDifferent MOA"]
+        x = np.array([1,2,3])
+    else:
+        xlabels = ["Same Compound\nSame MOA", "Different Compound\nDifferent MOA"]
+        x = np.array([1,2])
     ax.set_xticks(x)
     ax.set_xticklabels(xlabels, fontsize=8)
     ax.set_ylabel("Average Pairwise {} Similarity".format(metric.title()))
     ax.set_ylim((0,1.02))
-    plt.title("Compound Stratified {} Similarities".format(metric.title()))        
     width = .3
-    bar = ax.bar(x, [pert_mean, intra_mean, inter_mean], yerr=[pert_std, intra_std, inter_std], color=("grey", "blue", "orange"))
-    for i,j in zip(x, [(pert_mean, pert_size), (intra_mean, intra_size), (inter_mean, inter_size)]):
-        if j[0] < 0.01:
-            ax.annotate("{:.1E}\nn={:.1E}".format(j[0], j[1]), xy=(i - .41, j[0] +.06),fontsize=8)
-        else:
-            ax.annotate("{}\nn={:.1E}".format(round(j[0], 2), j[1]), xy=(i - .41, j[0] +.06),fontsize=8)
-        x = x + width
-    ax.annotate("two sided p ={:.1E}".format(p_val_two_sided), xy=(0,.98), fontsize=8)
+    if intra_size != 0:
+        plt.title("Compound Stratified {} Similarities".format(metric.title()))        
+        bar = ax.bar(x, [pert_mean, intra_mean, inter_mean], yerr=[pert_std, intra_std, inter_std], color=("grey", "blue", "orange"))
+        for i,j in zip(x, [(pert_mean, pert_size), (intra_mean, intra_size), (inter_mean, inter_size)]):
+            if j[0] < 0.01:
+                ax.annotate("{:.1E}\nn={:.1E}".format(j[0], j[1]), xy=(i - .41, j[0] +.06),fontsize=8)
+            else:
+                ax.annotate("{}\nn={:.1E}".format(round(j[0], 2), j[1]), xy=(i - .41, j[0] +.06),fontsize=8)
+            x = x + width
+        ax.annotate("two sided p ={:.1E}".format(p_val_two_sided), xy=(0,.98), fontsize=8)
+    else:
+        plt.title("{}: Compound Stratified {} Similarities".format(study.upper(), metric.title()))        
+        bar = ax.bar(x, [pert_mean, inter_mean], yerr=[pert_std, inter_std], color=("grey", "orange"))
+        for i,j in zip(x, [(pert_mean, pert_size), (inter_mean, inter_size)]):
+            if j[0] < 0.01:
+                ax.annotate("{:.1E}\nn={:.1E}".format(j[0], j[1]), xy=(i - .41, j[0] +.06),fontsize=8)
+            else:
+                ax.annotate("{}\nn={:.1E}".format(round(j[0], 2), j[1]), xy=(i - .41, j[0] +.06),fontsize=8)
+            x = x + width
     plt.savefig("outputs/intra_vs_inter_{}_{}_{}_{}.png".format(study, label_type, well_aggregator, metric), dpi=300)
 
 def plotKNN(study=None, metric=None, label_type=None, drop_neg_control=None, aggregate_by_well=None, well_aggregator="mean", deep_profile_type=None):
@@ -416,7 +458,7 @@ def plotKNN(study=None, metric=None, label_type=None, drop_neg_control=None, agg
                     max_values[plot][m] = y[i]
                     max_k = ks[i]
             ax.plot(ks, y, label=m + " ({} @ optimal k={})".format(round(max_values[plot][m], 2), max_k), color=color_map[m])
-        print("{} {} {} knn, MP improvement over CP: {}, DP: {}".format(study, label_type, plot, (max_values[plot]["MOAProfiler"] - max_values[plot]["CellProfiler"]) / max_values[plot]["CellProfiler"], (max_values[plot]["MOAProfiler"] - max_values[plot]["DeepProfiler"]) / max_values[plot]["DeepProfiler"]))
+        print("{} {} {} knn, {} MP improvement over CP: {}, DP: {}".format(study, label_type, plot, [max_values[plot]["CellProfiler"], max_values[plot]["DeepProfiler"], max_values[plot]["MOAProfiler"]] , (max_values[plot]["MOAProfiler"] - max_values[plot]["CellProfiler"]) / max_values[plot]["CellProfiler"], (max_values[plot]["MOAProfiler"] - max_values[plot]["DeepProfiler"]) / max_values[plot]["DeepProfiler"]))
         ax.set_xlabel("k")
         ax.set_ylabel(plot)
         ax.set_ylim((0,1.03))
@@ -425,103 +467,112 @@ def plotKNN(study=None, metric=None, label_type=None, drop_neg_control=None, agg
         plt.gcf().subplots_adjust(top=.76)
         plt.savefig("outputs/{}_{}_{}_{}_drop_neg_{}_well_aggregated_{}_{}_{}.png".format(plot, study, metric, label_type, drop_neg_control, aggregate_by_well, well_aggregator, deep_profile_type), dpi=300)
 
-def plotReduction(study=None, label_type=None, aggregate_by_well=None, well_aggregator=None, method="PCA", num_components=2):
+def plotReduction(deep_profile_type=None, study=None, label_type=None, aggregate_by_well=None, well_aggregator=None, method="PCA", num_components=2):
     """
     Loads latent dictionary, and plots the PCA or TSNE reduction of three example MOAs (chosen because they have 4 or more compounds each): ["CDK inhibitor", "HSP inhibitor", "HDAC inhibitor"]
     """
-    latent_dictionary = pickle.load(open("pickles/{}/plot/latent_dictionary_label_type_{}_well_aggregated_{}_{}_full_dataset.pkl".format(study, label_type, aggregate_by_well, well_aggregator), "rb"))
-    latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
-    embeddings = latent_dictionary["embeddings"]
-    labels = latent_dictionary["labels"]
-    perturbations = latent_dictionary["perturbations"]
-    ##drop negative 
-    purge_indices = []
-    for i in range(0, len(labels)):
-        if labels[i] in ["no_target", "Empty"]: ##JUMP represent with "no_target", lincs uses "Empty"
-            purge_indices.append(i)
-    embeddings = np.array([embeddings[j] for j in range(0, len(embeddings)) if j not in purge_indices])
-    labels = [labels[j] for j in range(0, len(labels)) if j not in purge_indices]
-    perturbations = [perturbations[j] for j in range(0, len(perturbations)) if j not in purge_indices]
-    ##reduce space to just n classes subset
-    n_classes_to_keep = ["CDK inhibitor", "HSP inhibitor", "HDAC inhibitor"]
-    indices = [i for i in range(0, len(labels)) if labels[i] in n_classes_to_keep]
-    embeddings = np.array([embeddings[i] for i in range(0, len(embeddings)) if i in indices])
-    labels = [labels[i] for i in range(0, len(labels)) if i in indices]
-    perturbations = [perturbations[i] for i in range(0, len(perturbations)) if i in indices]
-    label_set = n_classes_to_keep
-    axis_scale = 1
-    ##do normalized and un-normalized reduction
-    for normalized in [False]:
-        for trial in range(0, 3): ##TSNE is stochastic, so let's do this a couple times
-            if normalized:
-                X_new = sklearn.preprocessing.normalize(embeddings, axis=0) ##normalize each column (feature)
-            else:
-                X_new = embeddings
-            if method=="PCA":
-                reducer = sklearn.decomposition.PCA(n_components=num_components, svd_solver="auto") ##set svd_solver to "auto" to speed computation with a randomized Halko et al method, or "full"
-            if method == "TSNE":
-                reducer = sklearn.manifold.TSNE(n_components=num_components)
-            X_new = reducer.fit_transform(X_new)
-            if num_components == 2:
-                df = pd.DataFrame(columns = ["label", "perturbation", "{}1".format(method), "{}2".format(method)])
-                axis1 = X_new[:,0]
-                axis2 = X_new[:,1]
-            if num_components == 3:
-                df = pd.DataFrame(columns = ["label", "perturbation", "{}1".format(method), "{}2".format(method), "{}3".format(method)])
-                axis1 = X_new[:,0]
-                axis2 = X_new[:,1]
-                axis3 = X_new[:,2]
-            df["label"] = labels
-            df["perturbation"] = perturbations
-            df["{}1".format(method)] = axis1
-            df["{}2".format(method)] = axis2
-            if num_components == 3:
-                df["{}3".format(method)] = axis3
-            color_maps = {"greens": ["aquamarine", "turquoise", "lightseagreen", "mediumturquoise", "green",  "seagreen", "springgreen", "lime", "forestgreen", "limegreen", "darkgreen"], "oranges": ["blanchedalmond", "papayawhip", "moccasin", "oldlace", "bisque", "darkorange", "burlywood", "tan", "wheat", "navajowhite", "orange"], "blues": ["mediumpurple", "rebeccapurple", "blueviolet", "indigo", "cornflowerblue", "royalblue", "navy", "mediumblue", "darkblue", "blue", "slateblue"]}
-            marker_list = ["x", "*", "o"]
-            markers = {}
-            if num_components == 2:
-                fig, ax = plt.subplots()
-            else:
-                fig = plt.figure()
-                ax = plt.axes(projection ="3d")
-            ##for each class plot the data            
-            min_x, max_x = float("inf"), float("-inf")
-            for j in range(0, len(label_set)):
-                scats = []
-                label = label_set[j]
-                if len(color_maps) != 0:
-                    color_family = color_maps.pop(sorted(list(color_maps.keys()))[0])
-                    markers[label] = marker_list.pop()
-                else: 
-                    color_family = ["black", "dimgray", "grey", "darkgrey", "silver", "lightgrey"]
-                df_sub = df[df["label"] == label]
-                perturbations_subset = set(df_sub["perturbation"])
-                for pert in perturbations_subset: ##for each MOA, plot its different perturbations with slightly different colors  
-                    df_sub_sub = df_sub[df_sub["perturbation"] == pert]
-                    if len(color_family) != 0:
-                        color = color_family.pop()
-                    else:
-                        color = "black" 
-                    X = df_sub_sub.drop(["label"], axis=1).drop(["perturbation"], axis=1).to_numpy()
-                    axis1 = X[:,0]
-                    axis2 = X[:,1]
-                    min_x, max_x = min(min(axis1), min_x), max(max(axis1), max_x)
-                    if num_components == 3:
-                        axis3 = X[:,2]
-                    if num_components == 2:
-                        scat = ax.scatter(axis1, axis2, color=color, s=9, label=pert + " (" + label + ")", marker=markers[label])
-                    else:
-                        scat = ax.scatter(axis1, axis2, axis3,color=color, s=9, label=pert, markers=markers[label])
-                    scats.append(scat)
-            ax.set_xlim((min_x - abs(int(axis_scale * min_x)),max_x))
-            ax.set_xlabel("{}1".format(method),  fontsize=9)
-            ax.set_ylabel("{}2".format(method), fontsize=9)
-            if num_components == 3:
-                ax.set_zlabel("{}3".format(method), fontsize=9)
-            ax.legend(loc='upper left', prop={"size":7})
-            plt.title("Embeddings in {} Space\nColored by Perturbation".format(method), fontsize=12, y=1.02)
-            plt.savefig("outputs/reduced_latent_{}_{}_{}_{}_{}_{}_{}_{}.png".format(study, label_type, aggregate_by_well, well_aggregator, method, num_components, normalized, trial), dpi=300)
+    for alg in ["CP", "DP", "MP"]:
+        if alg == "MP":
+            latent_dictionary = pickle.load(open("pickles/{}/plot/latent_dictionary_label_type_{}_well_aggregated_{}_{}_full_dataset.pkl".format(study, label_type, aggregate_by_well, well_aggregator), "rb"))
+        if alg == "CP":
+            latent_dictionary = pickle.load(open("pickles/{}/plot/CP_latent_dictionary_label_type_{}_full_dataset.pkl".format(study, label_type), "rb"))
+        if alg == "DP":
+            latent_dictionary = pickle.load(open("pickles/{}/plot/DP_latent_dictionary_label_type_{}_{}_full_dataset.pkl".format(study, label_type, deep_profile_type), "rb"))
+            
+        latent_dictionary = standardizeEmbeddingsByDMSOPlate(latent_dictionary)
+        latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
+
+        embeddings = latent_dictionary["embeddings"]
+        labels = latent_dictionary["labels"]
+        perturbations = latent_dictionary["perturbations"]
+        ##drop negative 
+        purge_indices = []
+        for i in range(0, len(labels)):
+            if labels[i] in ["no_target", "Empty"]: ##JUMP represent with "no_target", lincs uses "Empty"
+                purge_indices.append(i)
+        embeddings = np.array([embeddings[j] for j in range(0, len(embeddings)) if j not in purge_indices])
+        labels = [labels[j] for j in range(0, len(labels)) if j not in purge_indices]
+        perturbations = [perturbations[j] for j in range(0, len(perturbations)) if j not in purge_indices]
+        ##reduce space to just n classes subset
+        n_classes_to_keep = ["CDK inhibitor", "HSP inhibitor", "HDAC inhibitor"]
+        indices = [i for i in range(0, len(labels)) if labels[i] in n_classes_to_keep]
+        embeddings = np.array([embeddings[i] for i in range(0, len(embeddings)) if i in indices])
+        labels = [labels[i] for i in range(0, len(labels)) if i in indices]
+        perturbations = [perturbations[i] for i in range(0, len(perturbations)) if i in indices]
+        label_set = n_classes_to_keep
+        axis_scale = 2
+        ##do normalized and un-normalized reduction
+        for normalized in [False]:
+            for trial in range(0, 3): ##TSNE is stochastic, so let's do this a couple times
+                if normalized:
+                    X_new = sklearn.preprocessing.normalize(embeddings, axis=0) ##normalize each column (feature)
+                else:
+                    X_new = embeddings
+                if method=="PCA":
+                    reducer = sklearn.decomposition.PCA(n_components=num_components, svd_solver="auto") ##set svd_solver to "auto" to speed computation with a randomized Halko et al method, or "full"
+                if method == "TSNE":
+                    reducer = sklearn.manifold.TSNE(n_components=num_components)
+                X_new = reducer.fit_transform(X_new)
+                if num_components == 2:
+                    df = pd.DataFrame(columns = ["label", "perturbation", "{}1".format(method), "{}2".format(method)])
+                    axis1 = X_new[:,0]
+                    axis2 = X_new[:,1]
+                if num_components == 3:
+                    df = pd.DataFrame(columns = ["label", "perturbation", "{}1".format(method), "{}2".format(method), "{}3".format(method)])
+                    axis1 = X_new[:,0]
+                    axis2 = X_new[:,1]
+                    axis3 = X_new[:,2]
+                df["label"] = labels
+                df["perturbation"] = perturbations
+                df["{}1".format(method)] = axis1
+                df["{}2".format(method)] = axis2
+                if num_components == 3:
+                    df["{}3".format(method)] = axis3
+                color_maps = {"greens": ["aquamarine", "turquoise", "lightseagreen", "mediumturquoise", "green",  "seagreen", "springgreen", "lime", "forestgreen", "limegreen", "darkgreen"], "oranges": ["blanchedalmond", "papayawhip", "moccasin", "oldlace", "bisque", "darkorange", "burlywood", "tan", "wheat", "navajowhite", "orange"], "blues": ["mediumpurple", "rebeccapurple", "blueviolet", "indigo", "cornflowerblue", "royalblue", "navy", "mediumblue", "darkblue", "blue", "slateblue"]}
+                marker_list = ["x", "*", "o"]
+                markers = {}
+                if num_components == 2:
+                    fig, ax = plt.subplots()
+                else:
+                    fig = plt.figure()
+                    ax = plt.axes(projection ="3d")
+                ##for each class plot the data            
+                min_x, max_x = float("inf"), float("-inf")
+                for j in range(0, len(label_set)):
+                    scats = []
+                    label = label_set[j]
+                    if len(color_maps) != 0:
+                        color_family = color_maps.pop(sorted(list(color_maps.keys()))[0])
+                        markers[label] = marker_list.pop()
+                    else: 
+                        color_family = ["black", "dimgray", "grey", "darkgrey", "silver", "lightgrey"]
+                    df_sub = df[df["label"] == label]
+                    perturbations_subset = sorted(list(set(df_sub["perturbation"])), reverse=True) ##sorted list fixes key order
+                    for pert in perturbations_subset: ##for each MOA, plot its different perturbations with slightly different colors  
+                        df_sub_sub = df_sub[df_sub["perturbation"] == pert]
+                        if len(color_family) != 0:
+                            color = color_family.pop()
+                        else:
+                            color = "black" 
+                        X = df_sub_sub.drop(["label"], axis=1).drop(["perturbation"], axis=1).to_numpy()
+                        axis1 = X[:,0]
+                        axis2 = X[:,1]
+                        min_x, max_x = min(min(axis1), min_x), max(max(axis1), max_x)
+                        if num_components == 3:
+                            axis3 = X[:,2]
+                        if num_components == 2:
+                            scat = ax.scatter(axis1, axis2, color=color, s=9, label=pert + " (" + label + ")", marker=markers[label])
+                        else:
+                            scat = ax.scatter(axis1, axis2, axis3,color=color, s=9, label=pert, markers=markers[label])
+                        scats.append(scat)
+                ax.set_xlim((min_x - abs(int(axis_scale * min_x)),max_x))
+                ax.set_xlabel("{}1".format(method),  fontsize=9)
+                ax.set_ylabel("{}2".format(method), fontsize=9)
+                if num_components == 3:
+                    ax.set_zlabel("{}3".format(method), fontsize=9)
+                ax.legend(loc='upper left', prop={"size":7})
+                plt.title("{}: {} Embeddings in {} Space\nColored by Perturbation".format(study.upper(), alg, method), fontsize=12, y=1.02)
+                plt.savefig("outputs/reduced_latent_{}_{}_{}_{}_{}_{}_{}_{}_{}.png".format(study, label_type, alg, aggregate_by_well, well_aggregator, method, num_components, normalized, trial), dpi=300)
 
 def plotClassSizeHistogram(study=None, verbose=False):
     """
@@ -606,12 +657,13 @@ def plotDistributionByAggregatedLatentRep(study=None, class_aggregator="mean", m
             top_scorer = top_scorers[i]
             bottom_scorer = bottom_scorers[i]
             if i == 0:
-                ax.annotate("bottom MP scorers:", xy=(.15, height),fontsize=6)
+                ax.annotate("bottom MP scorers:", xy=(.20, height),fontsize=6)
                 ax.annotate("top MP scorers:", xy=(.63, height),fontsize=6)
-                height -= int(max_height * .05)
-            ax.annotate("{}".format(bottom_scorer[0]), xy=(.15, height),fontsize=6)
+                height -= max(int(max_height * .05), .7)
+            ax.annotate("{}".format(bottom_scorer[0]), xy=(.20, height),fontsize=6)
             ax.annotate("{}".format(top_scorer[0]), xy=(.63, height),fontsize=6)
-            height -= int(max_height * .05)
+            height -= max(int(max_height * .05), .7)
+
         ax.set_ylabel("Number of MOAs")
         ax.set_xlabel(score_type.capitalize())
         plt.title("{}: Distribution of {} Scores for {} MOAs".format(study.upper(), score_type.capitalize(), len(classification_report)))
@@ -729,13 +781,13 @@ def generateIntraPlatevsInter(study=None, label_type=None, deep_profile_type=Non
     for latent_type in latent_types:
         if latent_type == "MOAProfiler":
             latent_dictionary = pickle.load(open("pickles/{}/plot/latent_dictionary_label_type_{}_well_aggregated_True_{}_full_dataset.pkl".format(study, label_type, well_aggregator), "rb"))
-            latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
         if latent_type == "CellProfiler":
             latent_dictionary = pickle.load(open("pickles/{}/plot/CP_latent_dictionary_label_type_{}_full_dataset.pkl".format(study, label_type), "rb"))
-            latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
         if latent_type == "DeepProfiler":
             latent_dictionary = pickle.load(open("pickles/{}/plot/DP_latent_dictionary_label_type_{}_{}_full_dataset.pkl".format(study, label_type, deep_profile_type), "rb"))
-            latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
+        latent_dictionary = standardizeEmbeddingsByDMSOPlate(latent_dictionary)
+        latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
+        latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
         embeddings, labels, wells, perturbations = latent_dictionary["embeddings"], latent_dictionary["labels"], latent_dictionary["wells"], latent_dictionary["perturbations"]
         ##drop negatives 
         purge_indices = []
@@ -849,9 +901,11 @@ def plotReducedColoredByPlate(study=None, label_type=None, aggregate_by_well=Non
     Plots visualization of embeddings colored by plate
     """
     latent_dictionary = pickle.load(open("pickles/{}/plot/latent_dictionary_label_type_{}_well_aggregated_{}_{}_full_dataset.pkl".format(study, label_type, aggregate_by_well, well_aggregator), "rb"))
-    latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
 
-    
+    latent_dictionary = standardizeEmbeddingsByDMSOPlate(latent_dictionary)
+    latent_dictionary = filterToTestSet(latent_dictionary, csv_map[label_type]["test"], study=study)
+    latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
+
     embeddings = latent_dictionary["embeddings"]
     labels = latent_dictionary["labels"]
     wells = latent_dictionary["wells"]
@@ -874,15 +928,17 @@ def plotReducedColoredByPlate(study=None, label_type=None, aggregate_by_well=Non
     embeddings = np.array([embeddings[j] for j in range(0, len(embeddings)) if j not in purge_indices])
     plates = [plates[j] for j in range(0, len(plates)) if j not in purge_indices]
     ##plot
-    ##do normalized and un-normalized reduction
     for normalized in [False]:
-        for trial in range(0, 10): ##TSNE is stochastic, so let's do this a couple times
+        for trial in range(0, 5): ##TSNE is stochastic, so let's do this a couple times
             colors=["black", "yellow", "brown", "pink", "grey", "purple", "orange", "red", "blue"]
-            random.shuffle(colors)
+            # random.shuffle(colors)
             if normalized:
                 X_new = sklearn.preprocessing.normalize(embeddings, axis=0) ##normalize each column (feature)
             else:
                 X_new = embeddings
+            if X_new.shape[0] == 0:
+                continue
+            print("ZZZ", X_new.shape)
             if method=="PCA":
                 reducer = sklearn.decomposition.PCA(n_components=num_components, svd_solver="auto") ##set svd_solver to "auto" to speed computation with a randomized Halko et al method, or "full"
             if method == "TSNE":
@@ -930,11 +986,11 @@ def plotReducedColoredByPlate(study=None, label_type=None, aggregate_by_well=Non
             ax.set_ylabel("{}2".format(method), fontsize=9)
             if num_components == 3:
                 ax.set_zlabel("{}3".format(method), fontsize=9)
-            ax.legend(loc='upper left', prop={"size":7})
+            ax.legend(loc='upper left', prop={"size":6})
             plt.title("Embeddings in {} Space\nColored by Plate".format(method), fontsize=12, y=1.02)
             box = ax.get_position()
             ax.set_position([box.x0, box.y0, box.width, box.height * 0.85])
-            ax.legend(loc='upper right', prop={"size":10}, bbox_to_anchor=(1, 1.32))
+            ax.legend(loc='upper right', prop={"size":7}, bbox_to_anchor=(1, 1.32))
             plt.gcf().subplots_adjust(top=.76)
             plt.savefig("outputs/reduced_latent_by_plate_{}_{}_{}_{}_{}_{}_{}_{}.png".format(study, label_type, aggregate_by_well, well_aggregator, method, num_components, normalized, trial), dpi=300)
 
@@ -1066,7 +1122,7 @@ def plotCompoundHoldoutKPrediction(study="JUMP1", label_type=None):
        
 def plotCompoundHoldoutKPredictionByLatentBars(study="JUMP1", label_type=None, deep_profile_type=None, class_aggregator=None, metric=None):
     """
-    Plots results when predicting compound holdout by model latent representations, vote by wells
+    Plots results when predicting compound holdout by model latent representations
     """
     if study == "JUMP1":
         num_compounds = 59
@@ -1086,9 +1142,9 @@ def plotCompoundHoldoutKPredictionByLatentBars(study="JUMP1", label_type=None, d
             cp_k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_True_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
             dp_k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_False_True_{}_{}_True_True_{}.pkl".format(study, class_aggregator, metric, label_type, deep_profile_type), "rb"))
         for profiler in ["CellProfiler", "DeepProfiler", "MOAProfiler"]:
-            mp_score = k_map[1][0]
-            dp_score = dp_k_map[1][0]
-            cp_score = cp_k_map[1][0]
+            mp_score = k_map[1][0][0]
+            dp_score = dp_k_map[1][0][0]
+            cp_score = cp_k_map[1][0][0]
             y = [cp_score, dp_score, mp_score]
         print("{} k=1 accuracy: {}".format(prediction_method, y))
         ax.bar(x, y, width=width, label=prediction_method)
@@ -1106,6 +1162,72 @@ def plotCompoundHoldoutKPredictionByLatentBars(study="JUMP1", label_type=None, d
     plt.gcf().subplots_adjust(top=.76)
     plt.savefig("outputs/{}_{}_compound_holdout_latent_k_pred_bar_combined_{}_{}.png".format(study, label_type, deep_profile_type, metric), dpi=300)
 
+def plotCompoundHoldoutMOABreakdown(study="JUMP1", label_type=None, deep_profile_type=None, class_aggregator=None, metric=None):
+    k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_False_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
+    cp_k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_True_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
+    dp_k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_False_True_{}_{}_True_True_{}.pkl".format(study, class_aggregator, metric, label_type, deep_profile_type), "rb"))
+    mapp = {"CP": cp_k_map, "DP": dp_k_map, "MP": k_map}
+    moa_to_correct = {moa: [0, 0, 0] for moa in set(k_map[1][1][1])} ##key: moa, value: [is_correct CP, is_correct DP, is_correct MP]
+    for index, method in enumerate(["CP", "DP", "MP"]):
+        km = mapp[method]
+        predictions = km[1][1][0]
+        labels = km[1][1][1]
+        for j in range(0, len(labels)):
+            if labels[j] == predictions[j]:
+                moa_to_correct[labels[j]][index] += 1
+    # print(moa_to_correct)
+    ##make dataframe and write to CSV 
+    moas = sorted(list(set(moa_to_correct.keys())))
+    CPs = [moa_to_correct[moa][0] for moa in moas]
+    DPs = [moa_to_correct[moa][1] for moa in moas]
+    MPs = [moa_to_correct[moa][2] for moa in moas]
+    df = pd.DataFrame(list(zip(moas, CPs, DPs, MPs)), columns=["moa", "CP", "DP", "MP"])
+    # print(df)
+    # print("CP: ", sum(list(df["CP"])) / float(len(df)))
+    # print("DP: ", sum(list(df["DP"])) / float(len(df)))
+    # print("MP: ", sum(list(df["MP"])) / float(len(df)))
+    ##add column for # of training compounds for each moa, see if there is a correlation between sample size and performance 
+    if study == "JUMP1":
+        train_df = pd.read_csv("csvs/JUMP1/learning/moas/compound_images_with_MOA_no_polypharm_well_excluded_compound_holdout_train_2_balanced_moas.csv")
+    if study == "lincs":
+        train_df = pd.read_csv("csvs/lincs/learning/moas/lincs_ten_micromolar_no_polypharm_compound_holdout_train_2_balanced_moas.csv")
+    moa_to_compounds = {m:set() for m in set(train_df["moas"])}
+    for index, row in train_df.iterrows():
+        moa_to_compounds[row["moas"]].add(row["perturbation"])
+    compound_cardinalities = [len(moa_to_compounds[moa]) for moa in list(df["moa"])]
+    df["# of training compounds"] = compound_cardinalities
+    df = df.sort_values("# of training compounds")
+    df.to_csv("outputs/compound_holdout_moa_breakdonwn_{}_{}_{}.csv".format(study, label_type, deep_profile_type), index=False)
+    ##break down MP accuracies by # of training compounds
+    x = []
+    y = []
+    ns = []
+    # for cardinality in set(df["# of training compounds"]):
+    for cardinality in range(1, max(df["# of training compounds"]) + 1):
+        sub_df = df[df["# of training compounds"] == cardinality]
+        if len(sub_df) > 0:
+            sub_df_accuracy = sum(list(sub_df["MP"])) / float(len(sub_df))
+        else:
+            sub_df_accuracy = 0
+        x.append(cardinality)
+        y.append(sub_df_accuracy)
+        ns.append(len(sub_df))
+    fig, ax = plt.subplots()
+    ax.bar(x, y)
+    if study == "JUMP1":
+        ax.set_ylim((0, max(y) + .05))
+    else:
+        ax.set_ylim((0, max(y) + .08))
+    for i,j,k in zip(x, y, ns):
+        if study == "JUMP1":
+            ax.annotate("n={}".format(k), xy=(i - .10 , j + .005),fontsize=8)
+        else:
+            ax.annotate("n={}".format(k), xy=(i - .50, j + .006),fontsize=8, rotation=270)
+    ax.set_xlabel("Number of Training Compounds")
+    ax.set_ylabel("Fraction of Compounds Correctly Predicted")
+    plt.title("{}: Accuracy by Number of Training Compounds".format(study.upper()))
+    plt.savefig("outputs/compound_holdout_moa_breakdonwn_{}_{}_{}.png".format(study, label_type, deep_profile_type))
+
 def plotLogisticRegression(study=None, class_aggregator="median", metric=None, label_type=None, drop_neg_control=None, aggregate_by_well=None, well_aggregator="mean", deep_profile_type=None):
     CP = pickle.load(open("pickles/{}/plot/logistic_regression_{}_CP_True_DP_False_{}_{}_drop_neg_{}_well_aggregated_{}.pkl".format(study, class_aggregator, metric, label_type, drop_neg_control, aggregate_by_well), "rb"))
     DP = pickle.load(open("pickles/{}/plot/logistic_regression_{}_CP_False_DP_True_{}_{}_drop_neg_{}_well_aggregated_{}_{}.pkl".format(study, class_aggregator, metric, label_type, drop_neg_control, aggregate_by_well, deep_profile_type), "rb"))
@@ -1121,7 +1243,7 @@ def plotLogisticRegression(study=None, class_aggregator="median", metric=None, l
     for i in range(0, 3):
         score_type = scores_map[i]
         scores = [entries[j][i] for j in range(0, 3)]
-        print("{} {} {} logistic regression, MP percent improvement over CP: {} and DP: {}".format(study, label_type, score_type, (scores[2] - scores[0]) / scores[0], (scores[2] - scores[1]) / scores[1]))
+        print("{} {} logistic regression {} {}, MP percent improvement over CP: {} and DP: {}".format(study, label_type, score_type, scores, (scores[2] - scores[0]) / scores[0], (scores[2] - scores[1]) / scores[1]))
         bar = ax.bar(x, scores, width=width, color=color_map[score_type], label=score_type)
         for i,j in zip(x, scores):
             ax.annotate("{:.0%}".format(j), xy=(i - .03, j +.03),fontsize=6)
@@ -1137,8 +1259,7 @@ def plotLogisticRegression(study=None, class_aggregator="median", metric=None, l
     plt.savefig("outputs/logistic_regression_{}_{}_{}_{}_drop_neg_{}_well_aggregated_{}_{}_{}.png".format(class_aggregator, study, metric, label_type, drop_neg_control, aggregate_by_well, well_aggregator, deep_profile_type), dpi=300)
 
 
-
-
+    
 if os.path.isdir("outputs"):
     shutil.rmtree("outputs")
 os.mkdir("outputs")
@@ -1160,17 +1281,26 @@ csv_map = {
     "moas_10uM_four_channel": {"train": "csvs/lincs/learning/moas/lincs_ten_micromolar_no_polypharm_train.csv", "valid": "csvs/lincs/learning/moas/lincs_ten_micromolar_no_polypharm_valid.csv", "test": "csvs/lincs/learning/moas/lincs_ten_micromolar_no_polypharm_test.csv", "test_no_neg": "csvs/lincs/learning/moas/lincs_ten_micromolar_no_polypharm_test_no_negative.csv", "full":  "csvs/lincs/lincs_ten_micromolar_no_polypharm.csv"}, 
 }
 
-permutations = [("JUMP1", "moa_targets_compounds"), ("lincs", "moas_10uM"), ("JUMP1", "moa_targets_compounds_polycompound"), ("lincs", "moas_10uM_polycompound"), ("JUMP1", "moa_targets_compounds_holdout_2"), ("lincs", "moas_10uM_compounds_holdout_2")]
+permutations = [("JUMP1", "moa_targets_compounds_polycompound"), ("lincs", "moas_10uM_polycompound"), ("JUMP1", "moa_targets_compounds_holdout_2"), ("lincs", "moas_10uM_compounds_holdout_2")]
+# permutations = [("JUMP1", "moa_targets_compounds_holdout_2"), ("lincs", "moas_10uM_compounds_holdout_2")]
+
 for study, label_type in permutations:
-    if study == "JUMP1" or "polycompound" in label_type:
+    if study == "JUMP1":
         deep_profile_types = ["model_{}".format(opt.well_aggregator)]
     else:
         deep_profile_types = ["model_{}".format(opt.well_aggregator), "bornholdt_trained"]
-    if "compounds_holdout" in label_type:
-        plotCompoundHoldoutKPrediction(study=study, label_type=label_type)
-        plotCompoundHoldoutKPredictionByLatentBars(study=study, label_type=label_type, deep_profile_type="model_{}".format(opt.well_aggregator), class_aggregator=opt.class_aggregator, metric=opt.metric)
-        continue
     
+    ##plotReduction(deep_profile_type=deep_profile_types[0], study=study, label_type=label_type, aggregate_by_well=True, well_aggregator="median", method="TSNE", num_components=2)
+    ##plotReducedColoredByPlate(study=study, label_type=label_type, aggregate_by_well=True, well_aggregator="median", method="TSNE", num_components=2, n_plates=5)
+
+    if "compounds_holdout" in label_type:
+        plotCompoundHoldoutKPredictionByLatentBars(study=study, label_type=label_type, deep_profile_type="model_{}".format(opt.well_aggregator), class_aggregator=opt.class_aggregator, metric=opt.metric)
+        plotCompoundHoldoutMOABreakdown(study=study, label_type=label_type, deep_profile_type="model_{}".format(opt.well_aggregator), class_aggregator=opt.class_aggregator, metric=opt.metric)
+        plotCompoundHoldoutKPrediction(study=study, label_type=label_type)
+        generateIntraMOAvsInter(study=study, label_type=label_type, well_aggregator=opt.well_aggregator, metric=opt.metric)
+        continue
+        
+    plotCellTypeTimepointSpecificPerformance(study=study, label_type=label_type)
     plotCompoundReplicateDistribution(study=study)
     plotFieldsPerWellDistribution(study=study)
     plotReplicateTrainingPerformances(study=study, label_type=label_type)
@@ -1179,14 +1309,16 @@ for study, label_type in permutations:
     plotClassSizeHistogram(study=study, verbose=False)
     plotMOAPertSpread(study=study)
     plotWellSpecificPerformance(study=study, label_type=label_type)
-    # generateIntraMOAvsInter(study=study, label_type=label_type, well_aggregator=opt.well_aggregator, metric=opt.metric)
-    ## plotReducedColoredByPlate(study=study, label_type=label_type, aggregate_by_well=True, well_aggregator="median", method="TSNE", num_components=2, n_plates=5)
-    ## plotReduction(study=study, label_type=label_type, aggregate_by_well=True, well_aggregator="median", method="TSNE", num_components=2)
+    generateIntraMOAvsInter(study=study, label_type=label_type, well_aggregator=opt.well_aggregator, metric=opt.metric)
     for deep_profile_type in deep_profile_types:
-        plotLogisticRegression(study=study, class_aggregator=opt.class_aggregator, metric=opt.metric, label_type=label_type, drop_neg_control=True, aggregate_by_well=True, well_aggregator=opt.well_aggregator, deep_profile_type=deep_profile_type)
+        print(deep_profile_type)
         plotDistributionByAggregatedLatentRep(study=study, class_aggregator=opt.class_aggregator, metric=opt.metric, label_type=label_type, drop_neg_control=True, aggregate_by_well=True, well_aggregator=opt.well_aggregator, deep_profile_type=deep_profile_type)
+        plotLogisticRegression(study=study, class_aggregator=opt.class_aggregator, metric=opt.metric, label_type=label_type, drop_neg_control=True, aggregate_by_well=True, well_aggregator=opt.well_aggregator, deep_profile_type=deep_profile_type)
         plotEnrichment(study=study, class_aggregator=opt.class_aggregator, metric=opt.metric, label_type=label_type, drop_neg_control=True, aggregate_by_well=True, well_aggregator=opt.well_aggregator, deep_profile_type=deep_profile_type)
         plotScoreByAggregatedLatentRep(study=study, class_aggregator=opt.class_aggregator, metric=opt.metric, label_type=label_type, drop_neg_control=True, aggregate_by_well=True, well_aggregator=opt.well_aggregator, deep_profile_type=deep_profile_type)
         plotKNN(study=study, metric=opt.metric, label_type=label_type, drop_neg_control=True, aggregate_by_well=True, well_aggregator=opt.well_aggregator, deep_profile_type=deep_profile_type)
         plotReplicateAndNonreplicateSimilarity(study=study, metric=opt.metric, label_type=label_type, drop_neg_control=True, aggregate_by_well=True, well_aggregator=opt.well_aggregator, deep_profile_type=deep_profile_type)
-        # generateIntraPlatevsInter(study=study, label_type=label_type, deep_profile_type=deep_profile_type, well_aggregator=opt.well_aggregator, metric=opt.metric)
+        generateIntraPlatevsInter(study=study, label_type=label_type, deep_profile_type=deep_profile_type, well_aggregator=opt.well_aggregator, metric=opt.metric)
+
+
+    

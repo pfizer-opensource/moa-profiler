@@ -8,7 +8,7 @@ def main():
     parser.add_argument("--mode", type=str, default="eval", help="train or eval or eval_compound_holdout")
     parser.add_argument("--distributed_data_parallel", default=False, action='store_true', help="whether to use DistributedDataParallel, if not present will use DataParallel by default")
     parser.add_argument("--study", type=str, default="JUMP1", help="JUMP1 or lincs")
-    parser.add_argument("--label_type", type=str, default="moa_targets_compounds", help="if study is JUMP1, then one of [moa_targets_compounds, moa_targets_compounds_polycompound, moa_targets_compounds_holdout_2]. If study is lincs, then one of [moas_10uM, moas_10uM_polycompound, moas_10uM_compounds_holdout_2]")
+    parser.add_argument("--label_type", type=str, default="moa_targets_compounds_polycompound", help="if study is JUMP1, then one of [moa_targets_compounds_polycompound, moa_targets_compounds_holdout_2]. If study is lincs, then one of [moas_10uM_polycompound, moas_10uM_compounds_holdout_2]")
     parser.add_argument("--eval_batch_size", type=int, default=30, help="batch size for evaluation")
     parser.add_argument("--n_epochs", type=int, default=100, help="number of epochs for training")
     parser.add_argument("--print_freq", type=int, default=1000, help="frequency of batches to print results")
@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--well_aggregator", type=str, default="median", help="method by which to aggregate wells: median, pca")
     parser.add_argument("--load_latents", default=False,  action='store_true', help="if True, will load latent dictionaries from pickle instead of generating")
     parser.add_argument("--metric", type=str, default="pearson", help="similarity metric to use: pearson or cosine")
-    
+    parser.add_argument("--standardization_type", type=str, default="by_all_wells, by_DMSO, by_plate, by_DMSO_plate", help="determines how to derive mean and std for standardization, by_all_wells=mean and std are computer over all wells, by_DMSO=stats computed over DMSO wells, by_plate=stats computed separately by plate, by_DMSO_plate=stats computed separately by plate and just DMSO wells for each plate")
     opt = parser.parse_args()
     tagline=str(opt)
     print("parameters: ", opt)
@@ -91,7 +91,7 @@ def main():
         test_set_wells_excluded = JUMPMOADataset(csv_map[opt.label_type]["test_wells_excluded"], data_transforms, jitter=False, label_index_map=label_index_map, augment=False)
         full_dataset = JUMPMOADataset(csv_map[opt.label_type]["full"], data_transforms, jitter=False, label_index_map=label_index_map, augment=False)
     if opt.label_type == "moa_targets_compounds_holdout_2": 
-        training_compounds = set(pd.read_csv(csv_map[opt.label_type]["train"])["perturbation"])
+        training_compounds = set(pd.read_csv(csv_map[opt.label_type]["train"])["perturbation"]).union(set(pd.read_csv(csv_map[opt.label_type]["valid"])["perturbation"]))
         test_set_wells_excluded = test_set ##test set here is already well-excluded
     if "moa_targets_compounds_replicates=" in opt.label_type:
         max_replicates = opt.label_type.split("=")[1]
@@ -119,7 +119,7 @@ def main():
         test_set_no_negative = LINCSClassificationDataset(csv_map[opt.label_type]["test_no_neg"], data_transforms, jitter=False, label_index_map=label_index_map, augment=False)    
         full_dataset = LINCSClassificationDataset(csv_map[opt.label_type]["full"], data_transforms, label_index_map=label_index_map, augment=False)
     if opt.label_type == "moas_10uM_compounds_holdout_2": 
-        training_compounds = set(pd.read_csv(csv_map[opt.label_type]["train"])["perturbation"])
+        training_compounds = set(pd.read_csv(csv_map[opt.label_type]["train"])["perturbation"]).union(set(pd.read_csv(csv_map[opt.label_type]["valid"])["perturbation"]))
     if "moas_10uM_replicates=" in opt.label_type: 
         max_replicates = opt.label_type.split("=")[1]
         label_index_map = pickle.load(open("pickles/lincs/label_index_map_from_lincs_ten_micromolar_no_polypharm.csv.pkl", "rb"))
@@ -194,9 +194,12 @@ def main():
             train(model=model, train_loader=train_loader, valid_loader=valid_loader, test_loader=test_loader, save=save_dir, n_epochs=opt.n_epochs, batch_size=train_batch_size, lr=opt.lr, wd=opt.wd, momentum=opt.momentum, seed=None, print_freq=opt.print_freq, tagline=tagline)
             model = model.module ##go from DataParallel back to model instance in preparation for model evaluation
     
-    if opt.mode == "eval" or opt.mode == "eval_compound_holdout": ##get CP and DP latent dictionaries  
+    ##get CP and DP latent dictionaries  
+    if opt.mode == "eval" or opt.mode == "eval_compound_holdout":
         aggregate_by_well = True
         drop_neg_control = True
+        standardization_map = {"by_all_wells": standardizeEmbeddings, "by_DMSO":standardizeEmbeddingsByDMSO, "by_plate":standardizeEmbeddingsByPlate, "by_DMSO_plate":standardizeEmbeddingsByDMSOPlate}
+        standardizationFunction = standardization_map[opt.standardization_type]
         ##CellProfiler and DeepProfiler analysis
         for method in ["cellProfiler", "deepProfiler"]:
             print("{} {}:".format(opt.study, method))
@@ -214,12 +217,14 @@ def main():
                         print("extracting {} deep profiler reps {} ".format(opt.study, deep_profile_type))
                         latent_dictionary = extractProfilerRepresentations(study=opt.study, method=method, loader=full_dataset_loader, deep_profile_type=deep_profile_type)
                         pickle.dump(latent_dictionary, open("pickles/{}/plot/DP_latent_dictionary_label_type_{}_{}_full_dataset.pkl".format(opt.study, opt.label_type, deep_profile_type), "wb"), protocol=pickle.HIGHEST_PROTOCOL)
-                    latent_dictionary = standardizeEmbeddings(latent_dictionary)
+
+                    latent_dictionary = standardizationFunction(latent_dictionary)
 
                     if opt.mode == "eval":
-                        logistic_regression_scores = logisticRegression(latent_dictionary, study=opt.study, training_csv=csv_map[opt.label_type]["train"], test_csv=csv_map[opt.label_type]["test"], drop_neg_control=False) ##should use the full latent dictionary 
+                        logistic_regression_scores = logisticRegression(latent_dictionary, study=opt.study, training_csv=csv_map[opt.label_type]["train"], test_csv=csv_map[opt.label_type]["test"], drop_neg_control=False) ##should use the full latent dictionary for logistic regression training 
                         pickle.dump(logistic_regression_scores, open("pickles/{}/plot/logistic_regression_{}_CP_False_DP_True_{}_{}_drop_neg_{}_well_aggregated_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, deep_profile_type), "wb"))
 
+                        latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
                         latent_dictionary = filterToTestSet(latent_dictionary, csv_map[opt.label_type]["test"], study=opt.study)
 
                         accuracy_map, k_pred_labels_map, k_stats, replicate_correlation_map = getNeighborAccuracy(latent_dictionary, metric=opt.metric, verbose=True, drop_neg_control=drop_neg_control)
@@ -236,8 +241,10 @@ def main():
 
                     ##compound holdout latent 
                     if opt.mode == "eval_compound_holdout":
+                        ##use the full multi-compound MOA dataset
+                        latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
                         pred_labels_map, k_map, latent_k_map = compoundHoldoutClassLatentAssignment(latent_dictionary, study=opt.study, class_aggregator=opt.class_aggregator, metric=opt.metric, drop_neg_control=drop_neg_control, training_compounds=training_compounds, label_index_map=label_index_map)
-                        pickle.dump(pred_labels_map, open("pickles/{}/plot/pred_labels_map_{}_latent_CP_False_DP_True_{}_{}_drop_neg_{}_well_aggregated_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, opt.well_aggregator), "wb"))
+                        pickle.dump(pred_labels_map, open("pickles/{}/plot/pred_labels_map_{}_latent_CP_False_DP_True_{}_{}_drop_neg_{}_well_aggregated_{}_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, opt.well_aggregator, deep_profile_type), "wb"))
                         pickle.dump(k_map, open("pickles/{}/plot/latent_vote_by_wells_k_map_{}_False_True_{}_{}_{}_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, deep_profile_type), "wb"))
                         pickle.dump(latent_k_map, open("pickles/{}/plot/latent_vote_by_embedding_{}_False_True_{}_{}_{}_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, deep_profile_type), "wb"))
             
@@ -249,12 +256,14 @@ def main():
                     print("CP extraction and analysis")
                     latent_dictionary = extractProfilerRepresentations(study=opt.study, method=method, loader=full_dataset_loader)
                     pickle.dump(latent_dictionary, open("pickles/{}/plot/CP_latent_dictionary_label_type_{}_full_dataset.pkl".format(opt.study, opt.label_type), "wb"), protocol=pickle.HIGHEST_PROTOCOL)
-                latent_dictionary = standardizeEmbeddings(latent_dictionary)
+
+                latent_dictionary = standardizationFunction(latent_dictionary) ##note: only standardize the raw embeddings, spherized includes normalization already, supp figure 4 & 6 generated without this call
             
                 if opt.mode == "eval":
                     logistic_regression_scores = logisticRegression(latent_dictionary, study=opt.study, training_csv=csv_map[opt.label_type]["train"], test_csv=csv_map[opt.label_type]["test"], drop_neg_control=False)
                     pickle.dump(logistic_regression_scores, open("pickles/{}/plot/logistic_regression_{}_CP_True_DP_False_{}_{}_drop_neg_{}_well_aggregated_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well), "wb"))
 
+                    latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
                     latent_dictionary = filterToTestSet(latent_dictionary, csv_map[opt.label_type]["test"], study=opt.study)
 
                     accuracy_map, k_pred_labels_map, k_stats, replicate_correlation_map = getNeighborAccuracy(latent_dictionary, metric=opt.metric, verbose=True, drop_neg_control=drop_neg_control)
@@ -270,7 +279,8 @@ def main():
                     pickle.dump(enrichment_dict, open("pickles/{}/plot/enrichment_{}_latent_CP_True_DP_False_{}_{}_drop_neg_{}_well_aggregated_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well), "wb"))
 
                 ##compound holdout latent 
-                if opt.mode == "eval_compound_holdout":                    
+                if opt.mode == "eval_compound_holdout":  
+                    latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
                     pred_labels_map, k_map, latent_k_map = compoundHoldoutClassLatentAssignment(latent_dictionary, study=opt.study, class_aggregator=opt.class_aggregator, metric=opt.metric, drop_neg_control=drop_neg_control, training_compounds=training_compounds, label_index_map=label_index_map)
                     pickle.dump(pred_labels_map, open("pickles/{}/plot/pred_labels_map_{}_latent_CP_True_DP_False_{}_{}_drop_neg_{}_well_aggregated_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, opt.well_aggregator), "wb"))
                     pickle.dump(k_map, open("pickles/{}/plot/latent_vote_by_wells_k_map_{}_True_False_{}_{}_{}_{}_None.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well), "wb"))
@@ -286,19 +296,25 @@ def main():
         else:
             latent_dictionary = getLatentRepresentations(study=opt.study, well_aggregator=opt.well_aggregator, model=model, loader=full_dataset_loader, cardinality=cardinality, label_index_map=label_index_map)
             pickle.dump(latent_dictionary, open("pickles/{}/plot/latent_dictionary_label_type_{}_well_aggregated_True_{}_full_dataset.pkl".format(opt.study, opt.label_type, opt.well_aggregator), "wb"), protocol=pickle.HIGHEST_PROTOCOL)        
+        print("loaded MP latent")
+        latent_dictionary = standardizationFunction(latent_dictionary) ##standardizing MP embeddings can hurt performance, but must apply same pipeline across CP, DP, and MP
 
     if opt.mode == "eval": ##evaluate and run normal inferences
         logistic_regression_scores = logisticRegression(latent_dictionary, study=opt.study, training_csv=csv_map[opt.label_type]["train"], test_csv=csv_map[opt.label_type]["test"], drop_neg_control=False)
         pickle.dump(logistic_regression_scores, open("pickles/{}/plot/logistic_regression_{}_CP_False_DP_False_{}_{}_drop_neg_{}_well_aggregated_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, opt.well_aggregator), "wb"))
-
+        
         # ##classification accuracy reporting -- exclude negative DMSO control 
         classification_map = getClassificationStats(model=model, loader=test_loader_no_negative, label_index_map=label_index_map)
         pickle.dump(classification_map, open("pickles/{}/plot/classification_map_{}".format(opt.study, opt.label_type), "wb"))
-        for stratify_by in ["plate_MOA", "plate", "well"]:
+        
+        stratifications = ["well"] if opt.study == "lincs" else ["cell_type", "timepoint", "well"]
+        for stratify_by in stratifications:
             stratified_performance_dict = getStratifiedPerformance(model=model, loader=test_loader,  stratify_by=stratify_by, label_index_map=label_index_map)
             pickle.dump(stratified_performance_dict, open("pickles/{}/plot/{}_specific_performance_map_{}.pkl".format(opt.study, stratify_by, opt.label_type), "wb"))
+        
         ##latent analysis
-        ##for evaluation, just use test set 
+        ##for evaluation, just use test set of multiple-compound MOAs
+        latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
         latent_dictionary = filterToTestSet(latent_dictionary, csv_map[opt.label_type]["test"], study=opt.study)
         aggregate_by_well = True
         drop_neg_control = True
@@ -315,14 +331,15 @@ def main():
         pickle.dump(pred_labels_map, open("pickles/{}/plot/pred_labels_map_{}_latent_CP_False_DP_False_{}_{}_drop_neg_{}_well_aggregated_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, opt.well_aggregator), "wb"))
 
     if opt.mode == "eval_compound_holdout":
-        ##load the full latent dictionary for compound holdout 
-        latent_dictionary = pickle.load(open("pickles/{}/plot/latent_dictionary_label_type_{}_well_aggregated_True_{}_full_dataset.pkl".format(opt.study, opt.label_type, opt.well_aggregator), "rb"))
-        model=model.cuda()
+        ##use the full latent dictionary for compound holdout 
+        latent_dictionary = removeSingleCompoundMOAEmbeddings(latent_dictionary)
+
         pred_labels_map, k_map, latent_k_map = compoundHoldoutClassLatentAssignment(latent_dictionary, study=opt.study, class_aggregator=opt.class_aggregator, metric=opt.metric, drop_neg_control=drop_neg_control, training_compounds=training_compounds, label_index_map=label_index_map)
         pickle.dump(pred_labels_map, open("pickles/{}/plot/pred_labels_map_{}_latent_CP_False_DP_False_{}_{}_drop_neg_{}_well_aggregated_{}_{}.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well, opt.well_aggregator), "wb"))
         pickle.dump(k_map, open("pickles/{}/plot/latent_vote_by_wells_k_map_{}_False_False_{}_{}_{}_{}_None.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well), "wb"))
         pickle.dump(latent_k_map, open("pickles/{}/plot/latent_vote_by_embedding_{}_False_False_{}_{}_{}_{}_None.pkl".format(opt.study, opt.class_aggregator, opt.metric, opt.label_type, drop_neg_control, aggregate_by_well), "wb"))
 
+        model=model.cuda()
         img_k_map, field_k_map, corrects = getHoldoutCompoundPrediction(model=model, study=opt.study, loader=test_loader_no_negative, label_index_map=label_index_map)
         pickle.dump(field_k_map, open("pickles/{}/plot/compound_holdout_model_pred_well_k_map_{}.pkl".format(opt.study, opt.label_type), "wb"))
         pickle.dump(img_k_map, open("pickles/{}/plot/compound_holdout_model_pred_image_k_map_{}.pkl".format(opt.study, opt.label_type), "wb"))

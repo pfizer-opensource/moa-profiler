@@ -1,0 +1,10 @@
+data/
+outputs/
+__pycache__/
+logs/
+quick_bash.sh
+setup.cfg
+pickles/JUMP1/plot
+pickles/lincs/plot
+pfizer.yml
+
