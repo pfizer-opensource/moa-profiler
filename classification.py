@@ -1206,7 +1206,7 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
     classes = []
     for i in range(0, len(reverse_map)):
         classes.append(reverse_map[i])
-    k_map = {} ##key: k, value: ((accuracy, precision,recall), (prediction, labels))
+    k_map = {} ##key: k, value: ((f1, precision,recall, accuracy), (prediction, labels))
     largest_k = 24 if study == "JUMP1" else 11 ##JUMP1 compounds were mostly at 23 compound replicates, LINCS had a range from 0 -> 10 
     for k in range(1, largest_k):
         predictions, labels = [], []
@@ -1218,8 +1218,8 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
             else:
                 predictions.append(perturbation_to_well_predictions[pert][0][0])
             labels.append(true_label)
-        accuracy, precision, recall = getScores(predictions=predictions, labels=labels, classes=classes)
-        k_map[k] = ((accuracy, precision, recall), (predictions, labels))
+        f1, precision, recall, accuracy = getScores(predictions=predictions, labels=labels, classes=classes)
+        k_map[k] = ((f1, precision, recall, accuracy), (predictions, labels))
         if k == 1:
             print("    latent vote by wells, k={}: {} {}".format(k, accuracy, len((perturbation_to_well_predictions))))
     
@@ -1254,7 +1254,7 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
         all_class_preds = sorted(all_class_preds, key=lambda x: x[1], reverse=True)
         predictions.append(all_class_preds)
         labels.append(true_label)
-    latent_k_map = {} ##key: k, value: ((accuracy, precision, recall), (sub_preds, sub_labels))
+    latent_k_map = {} ##key: k, value: ((f1, precision, recall, accuracy), (sub_preds, sub_labels))
     for k in range(1, len(class_to_aggregate_embedding) + 1): ##go from top-1 to top-all (i.e. all classes possible, which should yield 100% -> look at enrichment)
         sub_preds, sub_labels = [], []
         for i in range(0, len(labels)):
@@ -1265,25 +1265,24 @@ def compoundHoldoutClassLatentAssignment(latent_dictionary, study=None, class_ag
                 sub_preds.append(labels[i])
             else:
                 sub_preds.append(top_k[0])
-        accuracy, precision, recall = getScores(predictions=sub_preds, labels=sub_labels, classes=classes)
+        f1, precision, recall, accuracy = getScores(predictions=sub_preds, labels=sub_labels, classes=classes)
         if k == 1:
             print("    assignment by {} embedding similarity, k={}: {} {}".format(class_aggregator, k, accuracy, len(sub_labels)))
-            
-        # latent_k_map[k] = (accuracy, precision, recall)
-        latent_k_map[k] = ((accuracy, precision, recall), (sub_preds, sub_labels))
+        latent_k_map[k] = ((f1, precision, recall, accuracy), (sub_preds, sub_labels))
     return pred_labels_map, k_map, latent_k_map
 
 def getScores(predictions=None, labels=None, classes=None):
     """
-    Given non-binary predictions and labels, and classes as a list of MOAs, will return accuracy, precision, and recall
+    Given non-binary predictions and labels, and classes as a list of MOAs, will return f1, precision, recall, and accuracy
     """
      ##binarize preds and labels
     binary_labels = sklearn.preprocessing.label_binarize(labels, classes=classes) ##classes arg needs to be the same order as output of the neural network 
     binary_predictions = sklearn.preprocessing.label_binarize(predictions, classes=classes) 
-    accuracy = sklearn.metrics.accuracy_score(binary_labels, binary_predictions)
+    f1 = sklearn.metrics.f1_score(binary_labels, binary_predictions, average="weighted", zero_division=0)
     precision = sklearn.metrics.precision_score(binary_labels, binary_predictions, average="weighted", zero_division=0)
     recall = sklearn.metrics.recall_score(binary_labels, binary_predictions, average="weighted", zero_division=0)
-    return accuracy, precision, recall
+    accuracy = sklearn.metrics.accuracy_score(binary_labels, binary_predictions)
+    return f1, precision, recall, accuracy
 
 def getHoldoutCompoundPrediction(model=None, study=None, loader=None, label_index_map=None, label_type=None):
     """
@@ -1355,7 +1354,7 @@ def getHoldoutCompoundPrediction(model=None, study=None, loader=None, label_inde
                 predictions.append(top_one[0])
             labels.append(perturbation_to_label[perturbation])
             perts.append(perturbation)
-        accuracy, precision, recall = getScores(predictions=predictions, labels=labels, classes=classes)
+        f1, precision, recall, accuracy = getScores(predictions=predictions, labels=labels, classes=classes)
         img_k_map[k] = (accuracy, precision, recall)
         print("vote by images {}: {}, {}, {}".format(k, accuracy, precision, recall))
         print(len(set(labels)), len(perturbation_to_prediction))
@@ -1398,7 +1397,7 @@ def getHoldoutCompoundPrediction(model=None, study=None, loader=None, label_inde
             labels.append(true_label)
             perts.append(perturbation)
         ##binarize preds and labels 
-        accuracy, precision, recall = getScores(predictions=predictions, labels=labels, classes=classes)
+        f1, precision, recall, accuracy = getScores(predictions=predictions, labels=labels, classes=classes)
         field_k_map[k] = (accuracy, precision, recall)
         print("vote by wells k={}: {}, {}, {}".format(k, accuracy, precision, recall))
         print(len(set(labels)), len(perturbation_well_prediction))
@@ -1420,7 +1419,7 @@ def getHoldoutCompoundPrediction(model=None, study=None, loader=None, label_inde
                 subset_perts = [perts[i] for i in indices]
                 subset_labels = [labels[i] for i in indices]
                 subset_predictions = [predictions[i] for i in indices]
-                accuracy, precision, recall = getScores(predictions=subset_predictions, labels=subset_labels, classes=classes)
+                f1, precision, recall, accuracy = getScores(predictions=subset_predictions, labels=subset_labels, classes=classes)
                 print("cardinality {}, n={} compounds: {}, {}, {} ".format(cardinality, len(set(subset_perts)), accuracy, precision, recall))
     return img_k_map, field_k_map, corrects
 
@@ -1558,10 +1557,8 @@ def logisticRegression(latent_dictionary, study=None, training_csv=None, test_cs
             test_latent["embeddings"].append(latent_copy["embeddings"][i])
         else:
             validation_or_not_found.append(latent_copy["wells"][i])
-    
     ##remove single compound MOAs from test latent
     test_latent = removeSingleCompoundMOAEmbeddings(test_latent)
-    
     training_embeddings = np.array(training_latent["embeddings"])
     training_labels = list(training_latent["labels"])
     test_embeddings = np.array(test_latent["embeddings"])
@@ -1570,6 +1567,7 @@ def logisticRegression(latent_dictionary, study=None, training_csv=None, test_cs
     logisticRegr.fit(training_embeddings, training_labels)
     test_predictions = logisticRegr.predict(test_embeddings)
     scores = getScores(predictions=test_predictions, labels=test_labels, classes=list(set(latent_copy["labels"])))
+    scores = [scores[0], scores[1], scores[2]] ##f1, precision, recall
     return scores
 
 def removeSingleCompoundMOAEmbeddings(latent_dictionary):

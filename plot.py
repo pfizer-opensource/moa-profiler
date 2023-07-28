@@ -1128,11 +1128,14 @@ def plotCompoundHoldoutKPredictionByLatentBars(study="JUMP1", label_type=None, d
         num_compounds = 59
     else:
         num_compounds = 215
-    fig, ax = plt.subplots()
-    x = np.array([1,2,3])
-    ax.set_xticks(x)
-    width = 0.20
+    width = 0.18
+    score_index_map = {0: "F1", 1:"Precision", 2:"Recall", 3:"Accuracy"}
+    color_map = {0: "grey", 1:"salmon", 2:"lightsteelblue", 3:"orange"}
     for prediction_method in ["individual vote", "aggregated vote"]:
+        fig, ax = plt.subplots()
+        x = np.array([1,2,3])
+        ax.set_xticks(x)
+
         if prediction_method == "individual vote":
             k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_wells_k_map_{}_False_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
             cp_k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_wells_k_map_{}_True_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
@@ -1141,26 +1144,26 @@ def plotCompoundHoldoutKPredictionByLatentBars(study="JUMP1", label_type=None, d
             k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_False_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
             cp_k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_True_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
             dp_k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_False_True_{}_{}_True_True_{}.pkl".format(study, class_aggregator, metric, label_type, deep_profile_type), "rb"))
-        for profiler in ["CellProfiler", "DeepProfiler", "MOAProfiler"]:
-            mp_score = k_map[1][0][0]
-            dp_score = dp_k_map[1][0][0]
-            cp_score = cp_k_map[1][0][0]
+
+        for score_index in [0,1,2,3]: ##don't plot accuracy, same as recall in this case
+            mp_score = k_map[1][0][score_index]
+            dp_score = dp_k_map[1][0][score_index]
+            cp_score = cp_k_map[1][0][score_index]
             y = [cp_score, dp_score, mp_score]
-        print("{} k=1 accuracy: {}".format(prediction_method, y))
-        ax.bar(x, y, width=width, label=prediction_method)
-        ##annotate values
-        for i,j in zip(x, y):
-            ax.annotate("{:.1%}".format(j), xy=(i - .06, j +.001),fontsize=7)
-        x = x + width 
-    xlabels = ["CellProfiler", "DeepProfiler", "MOAProfiler"]
-    ax.set_xticklabels(xlabels)
-    plt.title("{}: Held-out Compound Accuracy\nBy Latent Similarity (n={} Compounds)".format(study.upper(), num_compounds))
-    ax.set_ylabel("Accuracy")
-    box = ax.get_position()
-    ax.set_position([box.x0, box.y0, box.width, box.height * 0.85])
-    ax.legend(loc='upper right', prop={"size":8}, bbox_to_anchor=(1, 1.32))
-    plt.gcf().subplots_adjust(top=.76)
-    plt.savefig("outputs/{}_{}_compound_holdout_latent_k_pred_bar_combined_{}_{}.png".format(study, label_type, deep_profile_type, metric), dpi=300)
+            ax.bar(x, y, width=width, color=color_map[score_index], label=score_index_map[score_index])
+            ##annotate values
+            for i,j in zip(x, y):
+                ax.annotate("{:.1%}".format(j), xy=(i - .06, j +.001),fontsize=6.5)
+            x = x + width 
+        xlabels = ["CellProfiler", "DeepProfiler", "MOAProfiler"]
+        ax.set_xticklabels(xlabels)
+        plt.title("{}: Held-out Compound Accuracy\nBy Latent Similarity, {} (n={} Compounds)".format(study.upper(), prediction_method.title(), num_compounds))
+        ax.set_ylabel("Score")
+        box = ax.get_position()
+        ax.set_position([box.x0, box.y0, box.width, box.height * 0.85])
+        ax.legend(loc='upper right', prop={"size":7.5}, bbox_to_anchor=(1, 1.35))
+        plt.gcf().subplots_adjust(top=.76)
+        plt.savefig("outputs/{}_{}_compound_holdout_latent_k_pred_bar_combined_{}_{}_{}.png".format(study, label_type, deep_profile_type, metric, prediction_method), dpi=300)
 
 def plotCompoundHoldoutMOABreakdown(study="JUMP1", label_type=None, deep_profile_type=None, class_aggregator=None, metric=None):
     k_map = pickle.load(open("pickles/{}/plot/latent_vote_by_embedding_{}_False_False_{}_{}_True_True_None.pkl".format(study, class_aggregator, metric, label_type), "rb"))
@@ -1282,7 +1285,6 @@ csv_map = {
 }
 
 permutations = [("JUMP1", "moa_targets_compounds_polycompound"), ("lincs", "moas_10uM_polycompound"), ("JUMP1", "moa_targets_compounds_holdout_2"), ("lincs", "moas_10uM_compounds_holdout_2")]
-# permutations = [("JUMP1", "moa_targets_compounds_holdout_2"), ("lincs", "moas_10uM_compounds_holdout_2")]
 
 for study, label_type in permutations:
     if study == "JUMP1":
